@@ -347,16 +347,16 @@ class VALLF(nn.Module):
             # prefix at begining
             int_low = (0.25 * y_lens.min()).type(torch.int64).item()
             prefix_len = torch.randint(int_low, int_low * 2, size=()).item()
-            prefix_len = min(prefix_len, 225)  # 24000/320 * 3s = 225 frames
+            prefix_len = min(prefix_len, 225)  # 24000/320 * 3s = 225 frames # 从1/4长度到1/2长度之间的随机值 和 3s之间取较小的那个
 
             y_prompts = self.nar_audio_embeddings[0](y[:, :prefix_len])
             y_emb = self.nar_audio_embeddings[0](y[:, prefix_len:])
             for j in range(1, self.num_quantizers):
-                y_prompts += self.nar_audio_embeddings[j](
+                y_prompts += self.nar_audio_embeddings[j](  # prompt部分直接累加7个quantizer的gt
                     codes[:, :prefix_len, j]
                 )
                 if j < nar_stage:
-                    y_emb += self.nar_audio_embeddings[j](
+                    y_emb += self.nar_audio_embeddings[j](  # 要学习的部分只给0-j_1的量化编码作为输入
                         codes[:, prefix_len:, j]
                     )
             y_emb = torch.concat([y_prompts, y_emb], axis=1)
@@ -790,7 +790,7 @@ class VALLE(VALLF):
         assert x_lens.ndim == 1, x_lens.shape
 
         y_prompts_codes = None
-        if isinstance(y, PromptedFeatures):
+        if isinstance(y, PromptedFeatures):  # y是torch.Tensor，这里直接skip
             y_prompts_codes, y = y.data
             prompts_len, y_lens = y_lens.data
             assert prompts_len.min() == prompts_len.max()
@@ -803,7 +803,7 @@ class VALLE(VALLF):
         # NOTE: x has been padded in TextTokenCollater
         x_mask = make_pad_mask(x_lens).to(x.device)
         y_mask = make_pad_mask(y_lens).to(y.device)
-        y_mask_int = y_mask.type(torch.int64)
+        y_mask_int = y_mask.type(torch.int64)  # mask的位置=1
 
         text = x
         codes = y.type(torch.int64) * (1 - y_mask_int.unsqueeze(dim=-1))
@@ -817,8 +817,8 @@ class VALLE(VALLF):
         metrics = {}
         total_loss = 0.0
 
-        xy_padding_mask = torch.concat([x_mask, y_mask], dim=1)
-        if self.ar_audio_prepend_bos:
+        xy_padding_mask = torch.concat([x_mask, y_mask], dim=1)  # x_mask: (5, 67), y_mask: (5, 1048), xy_padding_mask: (5, 1115)
+        if self.ar_audio_prepend_bos:  # skipped
             ar_xy_padding_mask = torch.concat(
                 [x_mask, F.pad(y_mask, (1, 0), value=False)], dim=1
             )
@@ -826,17 +826,17 @@ class VALLE(VALLF):
             ar_xy_padding_mask = xy_padding_mask
         # AR Decoder
         if train_stage in [0, 1]:
-            x = self.ar_text_embedding(text)
-            x = self.ar_text_prenet(x)
-            x = self.ar_text_position(x)
+            x = self.ar_text_embedding(text)  # x: (5, 67, 1024)
+            x = self.ar_text_prenet(x)  # x: (5, 67, 1024)
+            x = self.ar_text_position(x)  # x: (5, 67, 1024)
 
-            y_len = y_lens.max() + int(self.ar_audio_prepend_bos)
+            y_len = y_lens.max() + int(self.ar_audio_prepend_bos)  #y_len = 1048
 
             x_attn_mask = F.pad(
                 torch.zeros((x_len, x_len), dtype=torch.bool, device=x.device),
                 (0, y_len),
                 value=True,
-            )
+            )  # x_attn_mask: (67, 1115), 1115=67+1048, text部分自己全部可见（这里mask仅是attention的，pad导致的不涉及），audio部分对text来说全部不可见，False是没有被mask，True是被mask掉
             y_attn_mask = F.pad(
                 torch.triu(
                     torch.ones(y_len, y_len, dtype=torch.bool, device=x.device),
@@ -844,37 +844,37 @@ class VALLE(VALLF):
                 ),
                 (x_len, 0),
                 value=False,
-            )
-            xy_attn_mask = torch.concat([x_attn_mask, y_attn_mask], dim=0)
+            )  # y_attn_mask: (1048, 1115), text部分对audio全部可见，都是False，audio自身部分下三角是False，可见
+            xy_attn_mask = torch.concat([x_attn_mask, y_attn_mask], dim=0)  #xy_attn_mask: (1115,1115)
 
             # merge key padding and attention masks
             bsz, src_len = x.shape[0], x_len + y_len
             _xy_padding_mask = (
-                ar_xy_padding_mask.view(bsz, 1, 1, src_len)
-                .expand(-1, self.num_heads, -1, -1)
-                .reshape(bsz * self.num_heads, 1, src_len)
+                ar_xy_padding_mask.view(bsz, 1, 1, src_len)  # (5, 1115) -> (5, 1, 1, 1115)
+                .expand(-1, self.num_heads, -1, -1)  # (5,1,1,1115)->(5,16, 1,1115)
+                .reshape(bsz * self.num_heads, 1, src_len)  # (5,16,1,1115)->(80, 1, 1115)
             )
-            xy_attn_mask = xy_attn_mask.logical_or(_xy_padding_mask)
-
+            xy_attn_mask = xy_attn_mask.logical_or(_xy_padding_mask)  # 只保留全部是False的才是False
+            # xy_attn_mask: (1115, 1115) or _xy_padding_mask: (80, 1, 1115) = xy_attn_mask: (80, 1115, 1115)
             new_attn_mask = torch.zeros_like(xy_attn_mask, dtype=x.dtype)
-            new_attn_mask.masked_fill_(xy_attn_mask, float("-inf"))
+            new_attn_mask.masked_fill_(xy_attn_mask, float("-inf"))   #0表示没有被mask，-inf表示被mask掉
             xy_attn_mask = new_attn_mask
 
-            y_emb = self.ar_audio_embedding(y)
-            y_emb = self.ar_audio_prenet(y_emb)
-            y_pos = self.ar_audio_position(y_emb)
+            y_emb = self.ar_audio_embedding(y)  # y_emb: (5,1048,1024)
+            y_emb = self.ar_audio_prenet(y_emb)  #y_emb: (5, 1048,1024)
+            y_pos = self.ar_audio_position(y_emb)  # y_pos:(5, 1048,1024)
 
-            xy_pos = torch.concat([x, y_pos], dim=1)
+            xy_pos = torch.concat([x, y_pos], dim=1)  # xy_pos:(5, 1115,1024)，训练的时候输入是text+audio，没有prompt，原文第6页尾有描述
 
-            xy_dec, _ = self.ar_decoder(
+            xy_dec, _ = self.ar_decoder(  # TransformerEncoderLayer
                 (xy_pos, None),
                 mask=xy_attn_mask,
                 # src_key_padding_mask=xy_padding_mask,
                 # is_causal=True,
-            )
-            logits = self.ar_predict_layer(xy_dec[:, x_len:]).permute(0, 2, 1)
+            )  #xy_dec: (5, 1115, 1024)
+            logits = self.ar_predict_layer(xy_dec[:, x_len:]).permute(0, 2, 1)  # logits: (5, 1025, 1048), 只取audio部分对应的decoder输出算loss，量化码本长度1024，这里输出是1024+1，1024表示eos
             # loss
-            total_loss = F.cross_entropy(logits, targets, reduction=reduction)
+            total_loss = F.cross_entropy(logits, targets, reduction=reduction)  # targets: (5, 1048)
 
             metrics["ArTop10Accuracy"] = self.ar_accuracy_metric(
                 logits.detach(), targets
@@ -888,15 +888,15 @@ class VALLE(VALLF):
             y = y[:, 1:]
         if train_stage in [0, 2]:
             num_nar_layers = self.num_quantizers - 1
-            nar_stage = self.rng.choices(
+            nar_stage = self.rng.choices(  # 每次训练只训练7个量化编码器中的一个输出
                 [_k for _k in range(1, self.num_quantizers)],
                 weights=[1.0 / num_nar_layers] * num_nar_layers,
                 k=1,
             )[0]
 
-            x = self.nar_text_embedding(text)
+            x = self.nar_text_embedding(text)  # text: (2, 67)
             x = self.nar_text_prenet(x)
-            x = self.nar_text_position(x)
+            x = self.nar_text_position(x)  # x : (2, 67, 1024)
 
             y_emb, prefix_len = self._prepare_prompts(
                 y, y_lens, codes, nar_stage, y_prompts_codes
@@ -1009,7 +1009,7 @@ class VALLE(VALLF):
         x_len = x_lens.max()
         x_attn_mask = torch.zeros((x_len, x_len), dtype=torch.bool)
 
-        while True:
+        while True:  # 循环每次出1个next token，concat回来继续推理
             y_emb = self.ar_audio_embedding(y)
             y_emb = self.ar_audio_prenet(y_emb)
             y_pos = self.ar_audio_position(y_emb)
@@ -1042,11 +1042,11 @@ class VALLE(VALLF):
             )
 
             if (
-                torch.argmax(logits, dim=-1)[0] == NUM_AUDIO_TOKENS
-                or samples[0, 0] == NUM_AUDIO_TOKENS
-                or (y.shape[1] - prompts.shape[1]) > x_lens.max() * 16
+                torch.argmax(logits, dim=-1)[0] == NUM_AUDIO_TOKENS  #如果logits概率最大位置到了eos
+                or samples[0, 0] == NUM_AUDIO_TOKENS  # 如果sample到的id刚好对应eos
+                or (y.shape[1] - prompts.shape[1]) > x_lens.max() * 16  # 长度太长
             ):
-                if prompts.shape[1] == y.shape[1]:
+                if prompts.shape[1] == y.shape[1]:  # 直接就结束了
                     raise SyntaxError(
                         "well trained model shouldn't reach here."
                     )

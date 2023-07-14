@@ -217,7 +217,7 @@ class AudioTokenizer:
     ) -> None:
         # Instantiate a pretrained EnCodec model
         model = EncodecModel.encodec_model_24khz()
-        model.set_target_bandwidth(6.0)
+        model.set_target_bandwidth(6.0)  #n_q由bandwidth自动确定，比如6kpbs对应n_q=8，具体看https://github.com/facebookresearch/encodec
         remove_encodec_weight_norm(model)
 
         if not device:

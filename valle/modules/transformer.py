@@ -278,13 +278,15 @@ class TransformerEncoderLayer(nn.Module):
         Shape:
             see the docs in Transformer class.
         """
+        #src是一个tuple，第一个(5, 1115, 1024), 第二个是None
+        # src_mask: (80, 1115, 1115)
         x, stage_embedding = src, None
         is_src_tuple = False
         if isinstance(src, tuple):
             x, stage_embedding = src
             is_src_tuple = True
 
-        if src_key_padding_mask is not None:
+        if src_key_padding_mask is not None:  # skip
             _skpm_dtype = src_key_padding_mask.dtype
             if _skpm_dtype != torch.bool and not torch.is_floating_point(
                 src_key_padding_mask
