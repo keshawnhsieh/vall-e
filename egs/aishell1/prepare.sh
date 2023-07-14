@@ -17,7 +17,7 @@ stop_stage=4
 #      You can download aishell from https://www.openslr.org/33/
 #
 
-dl_dir=$PWD/download
+dl_dir=/home/keshawnhsieh/data
 
 dataset_parts="-p train -p dev -p test"  # debug
 
